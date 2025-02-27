@@ -1,4 +1,5 @@
 torch
-streamlit
 sentencepiece
-math
+streamlit
+pandas
+numpy
