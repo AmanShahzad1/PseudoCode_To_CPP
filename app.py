@@ -1,85 +1,174 @@
 import streamlit as st
 import torch
-import sentencepiece as spm
+import torch.nn as nn
+import json
 import math
 
-# Load the trained tokenizer
-sp = spm.SentencePieceProcessor(model_file="spoc_tokenizer.model")
+# Load vocabulary
+with open("vocabulary.json", "r") as f:
+    vocab = json.load(f)
 
-# Special tokens
-sos_token = sp.piece_to_id("<s>")
-eos_token = sp.piece_to_id("</s>")
-pad_token = 23999  # Set padding token to 23999 for consistency
+# Page Config
+st.set_page_config(page_title="Pseudocode to C++ Code Generator", layout="wide")
 
-# Transformer Model
-class TransformerSeq2Seq(torch.nn.Module):
-    def __init__(self, vocab_size, d_model=512, nhead=8, num_layers=6, dim_feedforward=2048, dropout=0.1):
-        super(TransformerSeq2Seq, self).__init__()
-        self.embedding = torch.nn.Embedding(vocab_size, d_model)
-        self.pos_encoder = PositionalEncoding(d_model)
-        self.dropout = torch.nn.Dropout(dropout)
-        self.transformer = torch.nn.Transformer(
-            d_model=d_model,
-            nhead=nhead,
-            num_encoder_layers=num_layers,
-            num_decoder_layers=num_layers,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout
-        )
-        self.fc_out = torch.nn.Linear(d_model, vocab_size)
+# Frontend Styling (Centered and Adjusted Width)
+st.markdown(
+    """
+    <style>
+    body, .stApp {
+        background-color: #ffffff;
+        color: #000000;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+    }
+    .stTextArea textarea, .stTextInput input, .stCode, .stButton button {
+        background-color: #ffffff;
+        color: #000000;
+        border-radius: 5px;
+        border: 1px solid #cccccc;
+        width: 100% !important;  /* Adjust width here */
+        margin: 0 auto;  /* Center align */
+    }
+    .stButton button {
+        background-color: #4CAF50;
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        text-align: center;
+        text-decoration: none;
+        display: inline-block;
+        font-size: 16px;
+        margin: 10px auto;  /* Center align */
+        cursor: pointer;
+        border-radius: 5px;
+        width: auto;  /* Auto width for button */
+    }
+    .stButton button:hover {
+        background-color: #45a049;
+    }
+    .stTextArea textarea {
+        height: 200px;
+    }
+    .stTextArea textarea:focus, .stTextInput input:focus {
+        border-color: #4CAF50;
+        box-shadow: 0 0 5px rgba(76, 175, 80, 0.5);
+    }
+    .stTitle {
+        text-align: center;
+        width: 100%;
+    }
+    .stMarkdown {
+        text-align: center;
+        width: 100%;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-    def forward(self, src, tgt):
-        src = self.embedding(src).permute(1, 0, 2)
-        src = self.pos_encoder(src)
-        src = self.dropout(src)
-        tgt = self.embedding(tgt).permute(1, 0, 2)
-        tgt = self.pos_encoder(tgt)
-        tgt = self.dropout(tgt)
-        output = self.transformer(src, tgt)
-        return self.fc_out(output.permute(1, 0, 2))
+# Transformer Configuration
+class Config:
+    vocab_size = 12388
+    max_length = 100
+    embed_dim = 256
+    num_heads = 8
+    num_layers = 2
+    feedforward_dim = 512
+    dropout = 0.1
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+config = Config()
 
 # Positional Encoding
-class PositionalEncoding(torch.nn.Module):
-    def __init__(self, d_model, max_len=512):
+class PositionalEncoding(nn.Module):
+    def __init__(self, embed_dim, max_len=100):
         super(PositionalEncoding, self).__init__()
-        pe = torch.zeros(max_len, d_model)
+        pe = torch.zeros(max_len, embed_dim)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        div_term = torch.exp(torch.arange(0, embed_dim, 2).float() * (-math.log(10000.0) / embed_dim))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer("pe", pe)
+        self.pe = pe.unsqueeze(0)
 
     def forward(self, x):
-        return x + self.pe[:, :x.size(1)]
+        return x + self.pe[:, :x.size(1)].to(x.device)
 
-# Load the trained model
-model_path = "transformer_seq2seq.pth"
-vocab_size = 24000
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = TransformerSeq2Seq(vocab_size).to(device)
-model.load_state_dict(torch.load(model_path, map_location=device))
-model.eval()
+# Transformer Model
+class Seq2SeqTransformer(nn.Module):
+    def __init__(self, config):
+        super(Seq2SeqTransformer, self).__init__()
+        self.embedding = nn.Embedding(config.vocab_size, config.embed_dim)
+        self.positional_encoding = PositionalEncoding(config.embed_dim, config.max_length)
+        self.transformer = nn.Transformer(
+            d_model=config.embed_dim,
+            nhead=config.num_heads,
+            num_encoder_layers=config.num_layers,
+            num_decoder_layers=config.num_layers,
+            dim_feedforward=config.feedforward_dim,
+            dropout=config.dropout
+        )
+        self.fc_out = nn.Linear(config.embed_dim, config.vocab_size)
 
-# Inference function
-def generate_code(pseudocode):
-    input_tokens = sp.encode(pseudocode, out_type=int)
-    input_tensor = torch.tensor([input_tokens], dtype=torch.long, device=device)
-    with torch.no_grad():
-        output = model(input_tensor, input_tensor[:, :-1])
-    output_tokens = output.argmax(dim=-1).squeeze().tolist()
-    return sp.decode(output_tokens)
+    def forward(self, src, tgt):
+        src_emb = self.embedding(src) * math.sqrt(config.embed_dim)
+        tgt_emb = self.embedding(tgt) * math.sqrt(config.embed_dim)
+        src_emb = self.positional_encoding(src_emb)
+        tgt_emb = self.positional_encoding(tgt_emb)
+        out = self.transformer(src_emb.permute(1, 0, 2), tgt_emb.permute(1, 0, 2))
+        out = self.fc_out(out.permute(1, 0, 2))
+        return out
 
-# Streamlit app
+# Load Models
+@st.cache_resource
+def load_model(path):
+    model = Seq2SeqTransformer(config).to(config.device)
+    model.load_state_dict(torch.load(path, map_location=config.device))
+    model.eval()
+    return model
+
+pseudo_to_cpp_model = load_model("transformer_coder.pth")
+
+# Translation Function
+def translate(model, input_tokens, vocab, device, max_length=50):
+    model.eval()
+    input_ids = [vocab.get(token, vocab["<unk>"]) for token in input_tokens]
+    input_tensor = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0).to(device)
+    output_ids = [vocab["<start>"]]
+
+    for _ in range(max_length):
+        output_tensor = torch.tensor(output_ids, dtype=torch.long).unsqueeze(0).to(device)
+        with torch.no_grad():
+            predictions = model(input_tensor, output_tensor)
+        next_token_id = predictions.argmax(dim=-1)[:, -1].item()
+        
+        if next_token_id == vocab["<end>"]:
+            break  # Stop generating when <end> token is reached
+        
+        output_ids.append(next_token_id)
+
+    id_to_token = {idx: token for token, idx in vocab.items()}
+    generated_tokens = [id_to_token.get(idx, "<unk>") for idx in output_ids[1:]]
+    
+    return " ".join(generated_tokens)  # Return translated code without <end> token
+
+# Streamlit UI (Centered and Adjusted Width)
 st.title("Pseudocode to C++ Code Generator")
 
 # Input text area for pseudocode
-pseudocode_input = st.text_area("Enter your pseudocode here:")
+pseudocode_input = st.text_area("Enter your pseudocode here:", height=200)
 
 # Button to generate code
 if st.button("Generate C++ Code"):
     if pseudocode_input:
-        generated_code = generate_code(pseudocode_input)
-        st.text_area("Generated C++ Code:", generated_code, height=300)
+        with st.spinner("Generating C++ code..."):
+            try:
+                tokens = pseudocode_input.strip().split()
+                generated_code = translate(pseudo_to_cpp_model, tokens, vocab, config.device)
+                st.text_area("Generated C++ Code:", generated_code, height=300)
+            except Exception as e:
+                st.error(f"An error occurred: {e}")
     else:
         st.warning("Please enter some pseudocode to generate C++ code.")
